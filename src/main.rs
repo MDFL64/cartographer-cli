@@ -1,6 +1,7 @@
 use core::f32;
 use std::{collections::HashMap, path::Path};
 
+use baby_shark::{decimation::{edge_decimation::{AlwaysDecimate, BoundingSphereDecimationCriteria, ConstantErrorDecimationCriteria}, prelude::EdgeDecimator}, exports::nalgebra::Vector3, io::stl::{StlReader, StlWriter}, mesh::{corner_table::table::CornerTable, traits::Mesh}};
 use osmio::{obj_types::StringWay, Node, OSMObj, OSMObjBase, OSMReader, Way};
 use rouille::{Response, ResponseBody};
 use tiff::{decoder::DecodingResult, tags::Tag};
@@ -24,6 +25,9 @@ fn respond_bytes(buffer: Buffer) -> Response {
 }
 
 fn main() {
+    /*for i in 0..30 {
+        build_grid("donkey_west",i);
+    }*/
     rouille::start_server("localhost:8080",move |request| {
         let url = request.url();
         let mut path = url.split("/");
@@ -66,6 +70,13 @@ fn main() {
             }
             Some("osm") => {
                 let buffer = read_osm(Path::new("map_source/map.osm"), region, 449993.99997825973, 4910006.000037198);
+                respond_bytes(buffer)
+            }
+            Some("file") => {
+                let name = path.next().unwrap();
+                let buffer = Buffer{
+                    bytes: std::fs::read(Path::new(name)).unwrap()
+                };
                 respond_bytes(buffer)
             }
             _ => {
@@ -266,6 +277,18 @@ impl ElevationFinder {
     }
 }
 
+fn read_tile_raw(name: &str, index: u32) -> Result<Vec<f32>, String> {
+    let file = std::fs::File::open(format!("elevation/{name}.tif")).map_err(|_| "failed to load data for region, does it exist?")?;
+    let mut tiff = tiff::decoder::Decoder::new(file).map_err(|_| "failed to read data for region, maybe corrupted?")?;
+
+    let data = tiff.read_chunk(index).map_err(|_| "failed to read tile at index, is it in bounds?")?;
+    if let DecodingResult::F32(data) = data {
+        Ok(data)
+    } else {
+        Err("elevation data is in incorrect format".to_owned())
+    }
+}
+
 fn read_tile(name: &str, index: u32) -> Result<Buffer, String> {
     let file = std::fs::File::open(format!("elevation/{name}.tif")).map_err(|_| "failed to load data for region, does it exist?")?;
     let mut tiff = tiff::decoder::Decoder::new(file).map_err(|_| "failed to read data for region, maybe corrupted?")?;
@@ -336,12 +359,114 @@ impl Buffer {
     }
 }
 
-/*
+fn make_grid(size: usize, scale: f64, mut f: impl FnMut(usize,usize)->f64) -> CornerTable<f64> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
 
-tag 33550 - ModelPixelScaleTag - 3 doubles
-tag 33922 - ModelTiepointTag
-tag 34735
-tag 34737
-tag 42113
+    for y in 0..size {
+        for x in 0..size {
+            let z = f(x,y);
+            vertices.push(Vector3::new(x as f64, y as f64, z) * scale);
+            if x < size - 1 && y < size - 1 {
+                let index = y*size + x;
+                indices.push(index+0);
+                indices.push(index+1);
+                indices.push(index+size);
 
-*/
+                indices.push(index+1);
+                indices.push(index+size+1);
+                indices.push(index+size);
+            }
+        }
+    }
+
+    CornerTable::from_vertices_and_indices(&vertices, &indices)
+}
+
+pub fn build_grid(name: &str, index: u32) {
+    let size = 512;
+
+    let tile = read_tile_raw(name,index).unwrap();
+    assert!(tile.len() == size*size);
+
+    let scale = 1.0;
+    let max_error = 1.0;
+
+    let criteria = ConstantErrorDecimationCriteria::new(scale * max_error);
+    let mut decimator = EdgeDecimator::new()
+        .decimation_criteria(criteria)
+        .min_faces_count(Some(10_000))
+        .keep_boundary(true);
+
+
+    let mut mesh = make_grid(512, scale, |x,y| {
+        let e = tile[y * 512 + x];
+        e as f64
+    });
+
+    println!("initial: {} / {}",mesh.vertices().count(),mesh.faces().count());
+    //StlWriter::new().write_stl_to_file(&mesh, Path::new("C:\\Users\\cogg\\Documents\\init.stl")).unwrap();
+    decimator.decimate(&mut mesh);
+    println!("decimated: {} / {}",mesh.vertices().count(),mesh.faces().count());
+
+    assert!(mesh.vertices().count() < 60_000);
+    assert!(mesh.faces().count() < 60_000);
+
+    //StlWriter::new().write_stl_to_file(&mesh, Path::new("C:\\Users\\cogg\\Documents\\dec1.stl")).unwrap();
+
+    let mut buffer = Buffer::default();
+
+    let mut min_z = 1.0f64/0.0;
+    let mut max_z = -1.0f64/0.0;
+    for i in mesh.vertices() {
+        let pos = mesh.vertex_position(&i);
+        //let normal = mesh.vertex_normal(&i).unwrap();
+        min_z = min_z.min(pos.z);
+        max_z = max_z.max(pos.z);
+    }
+    let range_z = max_z - min_z;
+
+    buffer.write_float(min_z as f32);
+    buffer.write_float(range_z as f32);
+    buffer.write_short(mesh.vertices().count() as u16);
+
+    let mut map = HashMap::<usize,u16>::new();
+    let mut next_vert_index = 0;
+    for i in mesh.vertices() {
+        map.insert(i, next_vert_index);
+        next_vert_index += 1;
+        {
+            let pos = mesh.vertex_position(&i);
+            let x = pos.x / 512.0 * 65535.0;
+            let y = pos.y / 512.0 * 65535.0;
+            let z = (pos.z - min_z) / range_z * 65535.0;
+            buffer.write_short(x as u16);
+            buffer.write_short(y as u16);
+            buffer.write_short(z as u16);
+        }
+        {
+            let normal = mesh.vertex_normal(&i).unwrap();
+            let x = normal.x * 127.0;
+            let y = normal.y * 127.0;
+            let z = normal.z * 127.0;
+            buffer.write_byte(x as i8 as u8);
+            buffer.write_byte(y as i8 as u8);
+            buffer.write_byte(z as i8 as u8);
+        }
+    }
+
+    buffer.write_short(mesh.faces().count() as u16);
+    for i in mesh.faces() {
+        let (a,b,c) = mesh.face_vertices(&i);
+        let a = *map.get(&a).unwrap();
+        let b = *map.get(&b).unwrap();
+        let c = *map.get(&c).unwrap();
+        buffer.write_short(b);
+        buffer.write_short(a);
+        buffer.write_short(c);
+    }
+
+    let name = format!("tile{}",index);
+
+    std::fs::write(Path::new(&name), buffer.bytes).unwrap();
+}
