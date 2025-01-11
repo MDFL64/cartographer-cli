@@ -11,3 +11,4 @@ rouille = "3.6.2"
 osmio = "0.14.0"
 utm = "0.1.6"
 baby_shark = "0.3.3"
+clap = { version = "4.5.26", features = ["derive"] }
