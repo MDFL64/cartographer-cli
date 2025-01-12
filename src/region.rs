@@ -12,7 +12,7 @@ struct UTMCoord {
 }
 
 pub struct Region {
-    name: String,
+    pub name: String,
     tiles: Vec<Arc<Tile>>,
     coord: UTMCoord
 }
@@ -60,13 +60,11 @@ impl Region {
         region
     }
 
-    fn ensure_region_dir_exists(&self, name: &str) {
-        std::fs::create_dir(format!("output/{}",name)).ok();
+    pub fn ensure_out_dir_exists(&self) {
+        std::fs::create_dir(format!("output/{}",self.name)).ok();
     }
 
     pub fn process_elevation(&self) {
-        self.ensure_region_dir_exists(&self.name);
-
         let thread_count = available_parallelism().unwrap().get();
 
         let queue = self.tiles.iter().enumerate().map(|(index,tile)| {

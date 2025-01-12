@@ -20,9 +20,13 @@ struct CommandArgs {
     /// The UTM zone of the region
     zone_number: u8,
 
-    /// Number of times to greet
+    /// Generate elevation tiles?
     #[arg(short, long)]
     elevation: bool,
+
+    /// Generate map file?
+    #[arg(short, long)]
+    map: bool
 }
 
 fn request_error(text: &str) -> Response {
@@ -48,12 +52,18 @@ fn main() {
 
     let region = Region::new(cli_args.name, cli_args.zone_number);
 
+    region.ensure_out_dir_exists();
     if cli_args.elevation {
         region.process_elevation();
     }
+    if cli_args.map {
+        let path = format!("input/{}.osm",region.name);
+        let buffer = read_osm(Path::new(&path), &region.name, 449993.99997825973, 4910006.000037198);
+        let out_path = format!("output/{}/map",region.name);
+        std::fs::write(Path::new(&out_path), buffer.bytes).unwrap();
+    }
 
-    //println!("{:?}",cli_args);
-    panic!();
+    std::process::exit(0);
 
     /*for i in 0..30 {
         build_grid("donkey_west",i);
@@ -123,7 +133,7 @@ fn read_osm(path: &Path, name: &str, base_x: f64, base_y: f64) -> Buffer {
     //let region_size = 10012.0;
     //let base_y = base_y - 10012.0;
 
-    let file = std::fs::File::open(format!("elevation/{name}.tif")).unwrap();
+    let file = std::fs::File::open(format!("input/{name}.tif")).unwrap();
     let tiff = tiff::decoder::Decoder::new(file).unwrap();
     let mut finder = ElevationFinder{
         tiff,
