@@ -57,17 +57,18 @@ fn main() {
         region.process_elevation();
     }
     if cli_args.map {
-        let path = format!("input/{}.osm",region.name);
-        let buffer = read_osm(Path::new(&path), &region.name, 449993.99997825973, 4910006.000037198);
-        let out_path = format!("output/{}/map",region.name);
-        std::fs::write(Path::new(&out_path), buffer.bytes).unwrap();
+        region.process_osm();
+        //let path = format!("input/{}.osm",region.name);
+        //let buffer = read_osm(Path::new(&path), &region.name, 449993.99997825973, 4910006.000037198);
+        //let out_path = format!("output/{}/map",region.name);
+        //std::fs::write(Path::new(&out_path), buffer.bytes).unwrap();
     }
 
     std::process::exit(0);
 
     /*for i in 0..30 {
         build_grid("donkey_west",i);
-    }*/
+    }
     rouille::start_server("localhost:8080",move |request| {
         let url = request.url();
         let mut path = url.split("/");
@@ -123,22 +124,15 @@ fn main() {
                 request_error("bad kind index")
             }
         }
-    });
+    });*/
 }
 
 const OBJ_BUILDING: u8 = 0;
 const OBJ_ROAD: u8 = 1;
 
-fn read_osm(path: &Path, name: &str, base_x: f64, base_y: f64) -> Buffer {
-    //let region_size = 10012.0;
-    //let base_y = base_y - 10012.0;
-
-    let file = std::fs::File::open(format!("input/{name}.tif")).unwrap();
-    let tiff = tiff::decoder::Decoder::new(file).unwrap();
-    let mut finder = ElevationFinder{
-        tiff,
-        cache: vec!()
-    };
+fn read_osm(path: &Path, region: &Region) -> Buffer {
+    let base_x = region.coord.easting;
+    let base_y = region.coord.northing;
 
     fn is_building(way: &StringWay) -> bool {
         way.tag("building").is_some()
@@ -195,55 +189,63 @@ fn read_osm(path: &Path, name: &str, base_x: f64, base_y: f64) -> Buffer {
             x -= base_x;
             y -= base_y;
             y = -y;
-            //println!("{} {}",x,y);
             nodes.insert(node.id(), (x as f32,y as f32));
         } else if let Some(way) = obj.as_way() {
             if is_building(&way) {
                 let (base_x,base_y) = mean_pos(way, &nodes);
-                if let Some(elevation) = finder.get_elevation(base_x, base_y) {
-                    buffer.write_byte(OBJ_BUILDING);
-                    buffer.write_float(base_x);
-                    buffer.write_float(base_y);
-                    buffer.write_float(elevation);
-                    buffer.write_float(building_height(way));
-                    
-                    let ids = way.nodes();
-                    // do not include duplicate final node
-                    let path_len = ids.len()-1;
-                    let mut path = Vec::with_capacity(path_len);
-                    for i in 0..path_len {
-                        let (x,y) = nodes.get(&ids[i]).unwrap();
-                        path.push((*x - base_x, -(*y - base_y)));
+                let mut ground_top = -1.0 / 0.0;
+                let mut ground_bot = 1.0 / 0.0;
+
+                let ids = way.nodes();
+                // do not include duplicate final node
+                let path_len = ids.len()-1;
+                let mut path = Vec::with_capacity(path_len);
+                for i in 0..path_len {
+                    let (x,y) = nodes.get(&ids[i]).unwrap();
+                    let e = region.get_elevation(*x, *y);
+                    if e > ground_top {
+                        ground_top = e;
                     }
-                    if !is_ccw(&path) {
-                        path.reverse();
+                    if e < ground_bot {
+                        ground_bot = e;
                     }
-    
-                    buffer.write_short(path.len().try_into().expect("too many nodes"));
-                    for (x,y) in path {
-                        buffer.write_float(x);
-                        buffer.write_float(y);
-                    }
+                    path.push((*x - base_x, *y - base_y));
                 }
+                if is_ccw(&path) {
+                    path.reverse();
+                }
+
+                buffer.write_byte(OBJ_BUILDING);
+                buffer.write_float(base_x);
+                buffer.write_float(base_y);
+                buffer.write_float(ground_bot);
+                buffer.write_float(ground_top);
+                buffer.write_float(building_height(way));
+                buffer.write_short(path.len().try_into().expect("too many nodes"));
+                for (x,y) in path {
+                    buffer.write_float(x);
+                    buffer.write_float(y);
+                }
+                
             } else if is_road(&way) {
                 let (base_x,base_y) = mean_pos(way, &nodes);
-                if let Some(base_elevation) = finder.get_elevation(base_x, base_y) {
-                    buffer.write_byte(OBJ_ROAD);
-                    buffer.write_float(base_x);
-                    buffer.write_float(base_y);
-                    buffer.write_float(base_elevation);
+                let base_elevation = region.get_elevation(base_x, base_y);
 
-                    let ids = way.nodes();
-                    // do not include duplicate final node
-                    let path_len = ids.len();
-                    buffer.write_short(path_len.try_into().expect("too many nodes"));
-                    for id in ids {
-                        let (x,y) = nodes.get(id).unwrap();
-                        let e = finder.get_elevation(*x, *y).unwrap_or(base_elevation);
-                        buffer.write_float(*x - base_x);
-                        buffer.write_float(-(*y - base_y));
-                        buffer.write_float(e - base_elevation);
-                    }
+                buffer.write_byte(OBJ_ROAD);
+                buffer.write_float(base_x);
+                buffer.write_float(base_y);
+                buffer.write_float(base_elevation);
+
+                let ids = way.nodes();
+                // do not include duplicate final node
+                let path_len = ids.len();
+                buffer.write_short(path_len.try_into().expect("too many nodes"));
+                for id in ids {
+                    let (x,y) = nodes.get(id).unwrap();
+                    let e = region.get_elevation(*x, *y);
+                    buffer.write_float(*x - base_x);
+                    buffer.write_float(-(*y - base_y));
+                    buffer.write_float(e - base_elevation);
                 }
             }
         }

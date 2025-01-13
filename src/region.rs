@@ -1,20 +1,20 @@
-use std::{collections::VecDeque, sync::{Arc, Mutex}, thread::available_parallelism};
+use std::{collections::VecDeque, path::Path, sync::{Arc, Mutex}, thread::available_parallelism};
 
 use tiff::{decoder::DecodingResult, tags::Tag};
 
-use crate::elevation::build_terrain_mesh;
+use crate::{elevation::build_terrain_mesh, read_osm};
 
 #[derive(Debug)]
-struct UTMCoord {
-    zone_number: u8,
-    easting: f64,
-    northing: f64,
+pub struct UTMCoord {
+    pub zone_number: u8,
+    pub easting: f64,
+    pub northing: f64,
 }
 
 pub struct Region {
     pub name: String,
+    pub coord: UTMCoord,
     tiles: Vec<Arc<Tile>>,
-    coord: UTMCoord
 }
 
 pub struct Tile {
@@ -23,6 +23,8 @@ pub struct Tile {
     pub height: u32
 }
 
+const REGION_SIZE: u32 = 10012;
+
 impl Region {
     pub fn new(name: String, zone_number: u8) -> Self {
         let path = format!("input/{name}.tif");
@@ -30,7 +32,7 @@ impl Region {
         let mut tiff = tiff::decoder::Decoder::new(file).expect("failed to decode elevation map");
 
         let dims= tiff.dimensions().unwrap();
-        assert_eq!(dims,(10012,10012));
+        assert_eq!(dims,(REGION_SIZE,REGION_SIZE));
 
         let chunk_dims = tiff.chunk_dimensions();
         assert_eq!(chunk_dims,(512,512));
@@ -100,5 +102,34 @@ impl Region {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+
+    pub fn process_osm(&self) {
+        let path = format!("input/{}.osm",self.name);
+        let buffer = read_osm(Path::new(&path), self);
+        let out_path = format!("output/{}/map",self.name);
+        std::fs::write(Path::new(&out_path), buffer.bytes).unwrap();
+        println!("> map done");
+    }
+
+    pub fn get_elevation(&self, x: f32, y: f32) -> f32 {
+        let x = x.clamp(0.01, REGION_SIZE as f32 - 0.01);
+        let y = y.clamp(0.01, REGION_SIZE as f32 - 0.01);
+
+        let chunk_size = 512.0;
+        let chunk_count = 20;
+        let cx = (x / chunk_size).floor() as i32;
+        let cy = (y / chunk_size).floor() as i32;
+        if cx < 0 || cy < 0 || cx >= chunk_count || cy >= chunk_count {
+            panic!("bad coord");
+        }
+
+        let chunk_index = (cy * chunk_count + cx) as usize;
+        let tile = &self.tiles[chunk_index];
+
+        let xx = (x % chunk_size) as u32;
+        let yy = (y % chunk_size) as u32;
+
+        tile.data[(tile.width * yy + xx) as usize]
     }
 }
