@@ -237,14 +237,13 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                 buffer.write_float(base_elevation);
 
                 let ids = way.nodes();
-                // do not include duplicate final node
                 let path_len = ids.len();
                 buffer.write_short(path_len.try_into().expect("too many nodes"));
                 for id in ids {
                     let (x,y) = nodes.get(id).unwrap();
                     let e = region.get_elevation(*x, *y);
                     buffer.write_float(*x - base_x);
-                    buffer.write_float(-(*y - base_y));
+                    buffer.write_float(*y - base_y);
                     buffer.write_float(e - base_elevation);
                 }
             }
