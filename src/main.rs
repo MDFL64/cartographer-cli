@@ -1,10 +1,9 @@
 use core::f32;
 use std::{collections::HashMap, path::{Path, PathBuf}};
 
-use baby_shark::{decimation::{edge_decimation::{AlwaysDecimate, BoundingSphereDecimationCriteria, ConstantErrorDecimationCriteria}, prelude::EdgeDecimator}, exports::nalgebra::Vector3, io::stl::{StlReader, StlWriter}, mesh::{corner_table::table::CornerTable, traits::Mesh}};
+use baby_shark::{decimation::{edge_decimation::{AlwaysDecimate, BoundingSphereDecimationCriteria, ConstantErrorDecimationCriteria}, prelude::EdgeDecimator}, exports::nalgebra::{Vector2, Vector3}, io::stl::{StlReader, StlWriter}, mesh::{corner_table::table::CornerTable, traits::Mesh}};
 use osmio::{obj_types::StringWay, Node, OSMObj, OSMObjBase, OSMReader, Way};
 use region::Region;
-use rouille::{Response, ResponseBody};
 use tiff::{decoder::DecodingResult, tags::Tag};
 use clap::Parser;
 
@@ -29,24 +28,6 @@ struct CommandArgs {
     map: bool
 }
 
-fn request_error(text: &str) -> Response {
-    Response{
-        data: ResponseBody::from_data(text),
-        headers: vec!(),
-        status_code: 400,
-        upgrade: None
-    }
-}
-
-fn respond_bytes(buffer: Buffer) -> Response {
-    Response{
-        data: ResponseBody::from_data(buffer.bytes),
-        headers: vec!(),
-        status_code: 200,
-        upgrade: None
-    }
-}
-
 fn main() {
     let cli_args = CommandArgs::parse();
 
@@ -58,73 +39,7 @@ fn main() {
     }
     if cli_args.map {
         region.process_osm();
-        //let path = format!("input/{}.osm",region.name);
-        //let buffer = read_osm(Path::new(&path), &region.name, 449993.99997825973, 4910006.000037198);
-        //let out_path = format!("output/{}/map",region.name);
-        //std::fs::write(Path::new(&out_path), buffer.bytes).unwrap();
     }
-
-    std::process::exit(0);
-
-    /*for i in 0..30 {
-        build_grid("donkey_west",i);
-    }
-    rouille::start_server("localhost:8080",move |request| {
-        let url = request.url();
-        let mut path = url.split("/");
-        let empty = path.next();
-        if empty != Some("") {
-            return request_error("bad url");
-        }
-
-        let Some(region) = path.next() else {
-            return request_error("no region");
-        };
-        if !region.chars().all(|c: char| c.is_ascii_alphanumeric() || c == '_') {
-            return request_error("invalid region");
-        }
-        match path.next() {
-            Some("e") => {
-                if let Some(n) = path.next() {
-                    match n {
-                        "info" => {
-                            panic!("info");
-                        }
-                        "base" => {
-                            panic!("lod");
-                        }
-                        n => {
-                            let Ok(n) = n.parse::<u32>() else {
-                                return request_error("bad elevation sub-resource");
-                            };
-                            match read_tile(region,n) {
-                                Ok(buffer) => {
-                                    respond_bytes(buffer)
-                                }
-                                Err(err) => request_error(&err)
-                            }
-                        }
-                    }
-                } else {
-                    request_error("no elevation sub-resource specified")
-                }
-            }
-            Some("osm") => {
-                let buffer = read_osm(Path::new("map_source/map.osm"), region, 449993.99997825973, 4910006.000037198);
-                respond_bytes(buffer)
-            }
-            Some("file") => {
-                let name = path.next().unwrap();
-                let buffer = Buffer{
-                    bytes: std::fs::read(Path::new(name)).unwrap()
-                };
-                respond_bytes(buffer)
-            }
-            _ => {
-                request_error("bad kind index")
-            }
-        }
-    });*/
 }
 
 const OBJ_BUILDING: u8 = 0;
@@ -148,8 +63,45 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
         3.0
     }
 
+    fn road_lanes(way: &StringWay) -> i32 {
+        if let Some(lanes) = way.tag("lanes") {
+            let lanes: Result<i32,_> = lanes.parse();
+            if let Ok(lanes) = lanes {
+                return lanes;
+            }
+        }
+        2
+    }
+
     fn is_road(way: &StringWay) -> bool {
         way.tag("highway").is_some()
+    }
+
+    enum RoadKind {
+        Road{lanes: i32},
+        FootPath,
+        BikePath
+    }
+
+    impl RoadKind {
+        pub fn is_level_path(&self) -> bool {
+            match self {
+                Self::BikePath | Self::FootPath => true,
+                _ => false
+            }
+        }
+    }
+
+    fn road_kind(way: &StringWay) -> RoadKind {
+        let highway_val = way.tag("highway");
+        if highway_val == Some("footway") || highway_val == Some("path") || way.tag("footway").is_some() {
+            RoadKind::FootPath
+        } else if highway_val == Some("cycleway") {
+            RoadKind::BikePath
+        } else {
+            let lanes = road_lanes(way);
+            RoadKind::Road{lanes}
+        }
     }
 
     fn mean_pos(way: &StringWay, nodes: &HashMap<i64,(f32,f32)>) -> (f32,f32) {
@@ -228,6 +180,12 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                 }
                 
             } else if is_road(&way) {
+                let kind = road_kind(&way);
+                let half_width = match kind {
+                    RoadKind::FootPath | RoadKind::BikePath => 1.0,
+                    RoadKind::Road { lanes } => lanes as f32 * 3.0
+                };
+
                 let (base_x,base_y) = mean_pos(way, &nodes);
                 let base_elevation = region.get_elevation(base_x, base_y);
 
@@ -239,140 +197,119 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                 let ids = way.nodes();
                 let path_len = ids.len();
                 buffer.write_short(path_len.try_into().expect("too many nodes"));
+                
+                struct RoadNode {
+                    center: Vector2<f32>,
+                    left: Vector3<f32>,
+                    right: Vector3<f32>,
+                    normal: Vector3<f32>
+                }
+
+                let mut base_path = Vec::with_capacity(path_len);
+
                 for id in ids {
                     let (x,y) = nodes.get(id).unwrap();
-                    let e = region.get_elevation(*x, *y);
-                    buffer.write_float(*x - base_x);
-                    buffer.write_float(*y - base_y);
-                    buffer.write_float(e - base_elevation);
+                    base_path.push(RoadNode{
+                        center: Vector2::new(*x, *y),
+                        left: Vector3::default(),
+                        right: Vector3::default(),
+                        normal: Vector3::new(0.0,0.0,1.0),
+                    });
+                }
+
+                let make3d = |coord: Vector2<f32>| {
+                    let e = region.get_elevation(coord.x, coord.y);
+                    Vector3::new(coord.x - base_x,coord.y - base_y, e - base_elevation)
+                };
+
+                // place left and right nodes
+                for i in 0..base_path.len() {
+                    let node = &base_path[i];
+
+                    let dir_1 = if i > 0 {
+                        let prev = &base_path[i-1];
+                        Some( (node.center - prev.center).normalize() )
+                    } else {
+                        None
+                    };
+                    let dir_2 = if i < base_path.len()-1 {
+                        let next = &base_path[i+1];
+                        Some( (next.center - node.center).normalize() )
+                    } else {
+                        None
+                    };
+
+                    let dir = match (dir_1,dir_2) {
+                        (Some(a),Some(b)) => (a + b) * 0.5,
+                        (Some(a),None) => a,
+                        (None,Some(a)) => a,
+                        _ => panic!("bad dir")
+                    };
+
+                    let dir_side = Vector2::new(dir.y,-dir.x);
+
+                    let mut left = make3d(node.center + dir_side * half_width);
+                    let mut right = make3d(node.center - dir_side * half_width);
+
+                    if kind.is_level_path() {
+                        let z = left.z.max(right.z);
+                        left.z = z;
+                        right.z = z;
+                    }
+
+                    let node = &mut base_path[i];
+                    node.left = left;
+                    node.right = right;
+                }
+
+                // calculate normal -- requires 3d node coords
+                for i in 0..base_path.len() {
+                    let node = &base_path[i];
+
+                    let dir_1 = if i > 0 {
+                        let prev = &base_path[i-1];
+                        Some( (node.left - prev.left).normalize() )
+                    } else {
+                        None
+                    };
+
+                    let dir_2 = if i < base_path.len()-1 {
+                        let next = &base_path[i+1];
+                        Some( (next.left - node.left).normalize() )
+                    } else {
+                        None
+                    };
+
+                    let dir_fwd = match (dir_1,dir_2) {
+                        (Some(a),Some(b)) => (a + b) * 0.5,
+                        (Some(a),None) => a,
+                        (None,Some(a)) => a,
+                        _ => panic!("bad dir")
+                    };
+
+                    let dir_side = (node.right - node.left).normalize();
+
+                    let dir_up = dir_fwd.cross(&dir_side);
+                    println!("{:?}",dir_up);
+                    base_path[i].normal = dir_up;
+                }
+
+                for node in base_path {
+                    buffer.write_float(node.left.x);
+                    buffer.write_float(node.left.y);
+                    buffer.write_float(node.left.z);
+                    buffer.write_float(node.right.x);
+                    buffer.write_float(node.right.y);
+                    buffer.write_float(node.right.z);
+                    buffer.write_float(node.normal.x);
+                    buffer.write_float(node.normal.y);
+                    buffer.write_float(node.normal.z);
                 }
             }
         }
     }
 
     buffer
-}
-
-struct ElevationFinder {
-    tiff: tiff::decoder::Decoder<std::fs::File>,
-    cache: Vec<CachedTile>
-}
-
-struct CachedTile {
-    index: u32,
-    data: Vec<f32>
-}
-
-impl ElevationFinder {
-    fn get_tile(&mut self, index: u32) -> Option<&[f32]> {
-        for i in (0..self.cache.len()).rev() {
-            let tile = &self.cache[i];
-            if tile.index == index {
-                if i != self.cache.len()-1 {
-                    let item = self.cache.remove(i);
-                    self.cache.push(item);
-                }
-                return self.cache.last().map(|item| item.data.as_slice());
-            }
-        }
-
-        // limit cache size
-        if self.cache.len() > 10 {
-            self.cache.remove(0);
-        }
-
-        if let Ok(chunk) = self.tiff.read_chunk(index) {
-            if let DecodingResult::F32(data) = chunk {
-                self.cache.push(CachedTile {
-                    index,
-                    data
-                });
-                return self.cache.last().map(|item| item.data.as_slice());
-            }
-        }
-
-        None
-    }
-
-    fn get_elevation(&mut self, x: f32, y: f32) -> Option<f32> {
-        let chunk_size = 512.0;
-        let chunk_count = 20;
-        let cx = (x / chunk_size).floor() as i32;
-        let cy = (y / chunk_size).floor() as i32;
-        if cx < 0 || cy < 0 || cx >= chunk_count || cy >= chunk_count {
-            None
-        } else {
-            let chunk_index = (cy * chunk_count + cx) as u32;
-            let (width,height) = self.tiff.chunk_data_dimensions(chunk_index);
-
-            if let Some(data) = self.get_tile(chunk_index) {
-                let xx = (x % chunk_size) as u32;
-                let yy = (y % chunk_size) as u32;
-
-                let e = data[(width * yy + xx) as usize];
-                return Some(e);
-            }
-            
-            None
-        }
-    }
-}
-
-fn read_tile_raw(name: &str, index: u32) -> Result<Vec<f32>, String> {
-    let file = std::fs::File::open(format!("elevation/{name}.tif")).map_err(|_| "failed to load data for region, does it exist?")?;
-    let mut tiff = tiff::decoder::Decoder::new(file).map_err(|_| "failed to read data for region, maybe corrupted?")?;
-
-    let data = tiff.read_chunk(index).map_err(|_| "failed to read tile at index, is it in bounds?")?;
-    if let DecodingResult::F32(data) = data {
-        Ok(data)
-    } else {
-        Err("elevation data is in incorrect format".to_owned())
-    }
-}
-
-fn read_tile(name: &str, index: u32) -> Result<Buffer, String> {
-    let file = std::fs::File::open(format!("elevation/{name}.tif")).map_err(|_| "failed to load data for region, does it exist?")?;
-    let mut tiff = tiff::decoder::Decoder::new(file).map_err(|_| "failed to read data for region, maybe corrupted?")?;
-    //let dims= tiff.dimensions().unwrap();
-    //println!("dims {:?}",dims);
-    let tie_point = tiff.get_tag_f64_vec(Tag::ModelTiepointTag).unwrap();
-    //println!("tie {:?}",tie_point);
-
-    let data = tiff.read_chunk(index).map_err(|_| "failed to read tile at index, is it in bounds?")?;
-    if let DecodingResult::F32(data) = data {
-        let (width,height) = tiff.chunk_data_dimensions(index);
-        let mut buffer = Buffer::default();
-
-        buffer.write_short(width as u16);
-        buffer.write_short(height as u16);
-
-        let mut min = f32::INFINITY;
-        let mut max = -f32::INFINITY;
-        for n in data.iter().copied() {
-            if n < min {
-                min = n;
-            }
-            if n > max {
-                max = n;
-            }
-        }
-        let range = max - min;
-
-        buffer.write_float(min);
-        buffer.write_float(range);
-
-        // invert image
-        for y in (0..height).rev() {
-            for x in 0..width {
-                let index = (y * width + x) as usize;
-                let height = data[index];
-                buffer.write_short( ((height - min) / range * 65535.0) as u16 );
-            }
-        }
-        Ok(buffer)
-    } else {
-        return Err("elevation data is in incorrect format".to_owned());
-    }
 }
 
 #[derive(Default)]
