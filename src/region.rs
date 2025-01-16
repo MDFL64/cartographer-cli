@@ -2,7 +2,7 @@ use std::{collections::VecDeque, path::Path, sync::{Arc, Mutex}, thread::availab
 
 use tiff::{decoder::DecodingResult, tags::Tag};
 
-use crate::{elevation::build_terrain_mesh, read_osm};
+use crate::{elevation::build_terrain_mesh, osm_fetch, read_osm};
 
 #[derive(Debug)]
 pub struct UTMCoord {
@@ -21,6 +21,13 @@ pub struct Tile {
     pub data: Vec<f32>,
     pub width: u32,
     pub height: u32
+}
+
+pub struct Bounds {
+    pub south: f64,
+    pub north: f64,
+    pub east: f64,
+    pub west: f64
 }
 
 const REGION_SIZE: u32 = 10012;
@@ -106,6 +113,10 @@ impl Region {
 
     pub fn process_osm(&self) {
         let path = format!("input/{}.osm",self.name);
+        if std::fs::metadata(&path).is_err() {
+            osm_fetch::fetch(self.get_bounds(), Path::new(&path));
+        }
+
         let buffer = read_osm(Path::new(&path), self);
         let out_path = format!("output/{}/map",self.name);
         std::fs::write(Path::new(&out_path), buffer.bytes).unwrap();
@@ -131,5 +142,15 @@ impl Region {
         let yy = (y % chunk_size) as u32;
 
         tile.data[(tile.width * yy + xx) as usize]
+    }
+
+    pub fn get_bounds(&self) -> Bounds {
+        // todo southern hemisphere
+        let zone_letter = 'T';
+
+        let (north,west) = utm::wsg84_utm_to_lat_lon(self.coord.easting, self.coord.northing, self.coord.zone_number, zone_letter).unwrap();
+        let (south,east) = utm::wsg84_utm_to_lat_lon(self.coord.easting + REGION_SIZE as f64, self.coord.northing - REGION_SIZE as f64, self.coord.zone_number, zone_letter).unwrap();
+
+        Bounds { north, south, east, west }
     }
 }

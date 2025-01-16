@@ -9,6 +9,7 @@ use clap::Parser;
 
 mod region;
 mod elevation;
+mod osm_fetch;
 
 #[derive(Parser, Debug)]
 #[command()]
@@ -29,6 +30,9 @@ struct CommandArgs {
 }
 
 fn main() {
+    //osm_fetch::fetch();
+    //panic!();
+
     let cli_args = CommandArgs::parse();
 
     let region = Region::new(cli_args.name, cli_args.zone_number);
@@ -290,7 +294,6 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                     let dir_side = (node.right - node.left).normalize();
 
                     let dir_up = dir_fwd.cross(&dir_side);
-                    println!("{:?}",dir_up);
                     base_path[i].normal = dir_up;
                 }
 
