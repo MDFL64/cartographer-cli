@@ -67,22 +67,30 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
         3.0
     }
 
-    fn road_lanes(way: &StringWay) -> i32 {
+    fn road_lanes(way: &StringWay) -> f32 {
         if let Some(lanes) = way.tag("lanes") {
-            let lanes: Result<i32,_> = lanes.parse();
+            let lanes: Result<f32,_> = lanes.parse();
             if let Ok(lanes) = lanes {
-                return lanes;
+                if lanes > 0.0 {
+                    return lanes;
+                } else {
+                    return 1.0;
+                }
             }
         }
-        2
+        2.0
     }
 
     fn is_road(way: &StringWay) -> bool {
         way.tag("highway").is_some()
     }
 
+    fn should_skip_road(way: &StringWay) -> bool {
+        way.tag("tunnel").is_some() || way.tag("bridge").is_some()
+    }
+
     enum RoadKind {
-        Road{lanes: i32},
+        Road{lanes: f32},
         FootPath,
         BikePath
     }
@@ -184,10 +192,13 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                 }
                 
             } else if is_road(&way) {
+                if should_skip_road(&way) {
+                    continue;
+                }
                 let kind = road_kind(&way);
                 let half_width = match kind {
                     RoadKind::FootPath | RoadKind::BikePath => 1.0,
-                    RoadKind::Road { lanes } => lanes as f32 * 3.0
+                    RoadKind::Road { lanes } => lanes as f32 * 1.5
                 };
 
                 let (base_x,base_y) = mean_pos(way, &nodes);
@@ -250,10 +261,18 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                         _ => panic!("bad dir")
                     };
 
+                    let mut width_mul = 1.0;
+
+                    if let (Some(a),Some(b)) = (dir_1,dir_2) {
+                        // correction maxes out at 90 degrees
+                        let angle = a.angle(&b).min(1.57);
+                        width_mul = 1.0 / (angle / 2.0).cos();
+                    }
+
                     let dir_side = Vector2::new(dir.y,-dir.x);
 
-                    let mut left = make3d(node.center + dir_side * half_width);
-                    let mut right = make3d(node.center - dir_side * half_width);
+                    let mut left = make3d(node.center + dir_side * half_width * width_mul);
+                    let mut right = make3d(node.center - dir_side * half_width * width_mul);
 
                     if kind.is_level_path() {
                         let z = left.z.max(right.z);
