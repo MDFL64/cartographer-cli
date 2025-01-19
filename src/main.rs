@@ -50,6 +50,22 @@ fn main() {
 const OBJ_BUILDING: u8 = 0;
 const OBJ_ROAD: u8 = 1;
 
+#[repr(u8)]
+enum BuildingKind {
+    House, // siding, maybe brick, usually pitched roofs
+    Tower, // skyscraper
+    Commercial, // flat with few windows -- shops, theaters, etc
+    Industrial, // Icky
+    Parking,    // Parking garage
+    School,     // Bricks?
+    Hospital
+}
+
+#[repr(u8)]
+enum RoofKind {
+    Flat
+}
+
 fn read_osm(path: &Path, region: &Region) -> Buffer {
     let base_x = region.coord.easting;
     let base_y = region.coord.northing;
@@ -59,33 +75,71 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
     }
 
     fn building_height(way: &StringWay) -> f32 {
-        if let Some(levels) = way.tag("building:levels") {
-            let levels: Result<f32,_> = levels.parse();
-            if let Ok(levels) = levels {
-                return levels * 3.0;
-            }
-        } else if let Some(height) = way.tag("height") {
-            // very bare-bones height parsing attempt
+        if let Some(height) = way.tag("height") {
+            // very bare-bones height parsing attempt, TODO units
             let height: Result<f32,_> = height.parse();
             if let Ok(height) = height {
                 return height;
             }
         }
+        if let Some(levels) = way.tag("building:levels") {
+            let levels: Result<f32,_> = levels.parse();
+            if let Ok(levels) = levels {
+                return levels * 3.0;
+            }
+        }
         3.0
     }
 
-    fn road_lanes(way: &StringWay) -> f32 {
-        if let Some(lanes) = way.tag("lanes") {
-            let lanes: Result<f32,_> = lanes.parse();
-            if let Ok(lanes) = lanes {
-                if lanes > 0.0 {
-                    return lanes;
-                } else {
-                    return 1.0;
-                }
-            }
+    fn building_infer_kind(way: &StringWay, area: f32, height: f32) -> BuildingKind {
+        if height > 10.0 {
+            BuildingKind::Tower
+        } else if area > 500.0 {
+            BuildingKind::Commercial
+        } else {
+            BuildingKind::House
         }
-        2.0
+    }
+
+    fn path_area(path: &[(f32,f32)]) -> f32 {
+        // just finds the area of the bounds
+        // TODO actually calculate area
+        if path.len() < 3 {
+            return 0.0;
+        }
+        let mut x_min = 1f32/0.0;
+        let mut y_min = 1f32/0.0;
+        let mut x_max = -1f32/0.0;
+        let mut y_max = -1f32/0.0;
+        for (x,y) in path {
+            x_min = x_min.min(*x);
+            y_min = y_min.min(*y);
+            x_max = x_max.max(*x);
+            y_max = y_max.max(*y);
+        }
+        let w = x_max - x_min;
+        let h = y_max - y_min;
+        w * h
+    }
+
+    fn building_color(way: &StringWay) -> u32 {
+        if let Some(color) = way.tag("building:colour") {
+            println!("color = {}",color);
+        }
+        if let Some(color) = way.tag("roof:colour") {
+            println!("roof color = {}",color);
+        }
+        // ~
+        if let Some(color) = way.tag("building:material") {
+            println!("mat = {}",color);
+        }
+        if let Some(color) = way.tag("material") {
+            println!("dumb mat = {}",color);
+        }
+        if let Some(color) = way.tag("roof:material") {
+            println!("roof mat = {}",color);
+        }
+        0
     }
 
     fn is_road(way: &StringWay) -> bool {
@@ -94,6 +148,20 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
     
     fn is_road_oneway(way: &StringWay) -> bool {
         way.tag("oneway").is_some()
+    }
+
+    fn road_lanes(way: &StringWay) -> f32 {
+        if let Some(lanes) = way.tag("lanes") {
+            let lanes: Result<f32,_> = lanes.parse();
+            if let Ok(lanes) = lanes {
+                if lanes >= 1.0 {
+                    return lanes;
+                } else {
+                    return 1.0;
+                }
+            }
+        }
+        2.0
     }
 
     fn should_skip_road(way: &StringWay) -> bool {
@@ -190,12 +258,26 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                     path.reverse();
                 }
 
+                let mut height = building_height(way);
+                let area = path_area(&path);
+                let kind = building_infer_kind(way, area, height);
+                let roof_kind = RoofKind::Flat;
+                // bump up height for non-houses
+                match kind {
+                    BuildingKind::Commercial | BuildingKind::Industrial => {
+                        height = height.max(6.0)
+                    }
+                    _ => ()
+                }
+
                 buffer.write_byte(OBJ_BUILDING);
                 buffer.write_float(base_x);
                 buffer.write_float(base_y);
                 buffer.write_float(ground_bot);
                 buffer.write_float(ground_top);
-                buffer.write_float(building_height(way));
+                buffer.write_float(height);
+                buffer.write_byte(kind as u8);
+                buffer.write_byte(roof_kind as u8);
                 buffer.write_short(path.len().try_into().expect("too many nodes"));
                 for (x,y) in path {
                     buffer.write_float(x);
