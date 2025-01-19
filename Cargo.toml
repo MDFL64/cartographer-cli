@@ -13,3 +13,4 @@ baby_shark = "0.3.3"
 clap = { version = "4.5.26", features = ["derive"] }
 reqwest = { version = "0.12.12", features = ["blocking"] }
 urlencoding = "2.1.3"
+flate2 = "1.0.35"

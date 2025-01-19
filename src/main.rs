@@ -1,7 +1,8 @@
 use core::f32;
-use std::{collections::HashMap, path::{Path, PathBuf}};
+use std::{collections::HashMap, io::Write, path::{Path, PathBuf}};
 
 use baby_shark::{decimation::{edge_decimation::{AlwaysDecimate, BoundingSphereDecimationCriteria, ConstantErrorDecimationCriteria}, prelude::EdgeDecimator}, exports::nalgebra::{Vector2, Vector3}, io::stl::{StlReader, StlWriter}, mesh::{corner_table::table::CornerTable, traits::Mesh}};
+use flate2::{write::GzEncoder, Compression};
 use osmio::{obj_types::StringWay, Node, OSMObj, OSMObjBase, OSMReader, Way};
 use region::Region;
 use tiff::{decoder::DecodingResult, tags::Tag};
@@ -63,6 +64,12 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
             if let Ok(levels) = levels {
                 return levels * 3.0;
             }
+        } else if let Some(height) = way.tag("height") {
+            // very bare-bones height parsing attempt
+            let height: Result<f32,_> = height.parse();
+            if let Ok(height) = height {
+                return height;
+            }
         }
         3.0
     }
@@ -84,9 +91,13 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
     fn is_road(way: &StringWay) -> bool {
         way.tag("highway").is_some()
     }
+    
+    fn is_road_oneway(way: &StringWay) -> bool {
+        way.tag("oneway").is_some()
+    }
 
     fn should_skip_road(way: &StringWay) -> bool {
-        way.tag("tunnel").is_some() || way.tag("bridge").is_some()
+        way.tag("tunnel").is_some() || way.tag("bridge").is_some() || way.tag("highway") == Some("steps")
     }
 
     enum RoadKind {
@@ -209,6 +220,16 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                 buffer.write_float(base_y);
                 buffer.write_float(base_elevation);
 
+                if let RoadKind::Road { lanes } = kind {
+                    let kind = if is_road_oneway(way) { 2 } else { 1 };
+                    buffer.write_byte(kind);
+                    buffer.write_byte(lanes.ceil() as u8);
+                } else {
+                    buffer.write_byte(0);
+                    buffer.write_byte(1);
+                }
+                // type
+
                 let ids = way.nodes();
                 let path_len = ids.len();
                 buffer.write_short(path_len.try_into().expect("too many nodes"));
@@ -217,7 +238,8 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                     center: Vector2<f32>,
                     left: Vector3<f32>,
                     right: Vector3<f32>,
-                    normal: Vector3<f32>
+                    normal: Vector3<f32>,
+                    direction: Vector3<f32>,
                 }
 
                 let mut base_path = Vec::with_capacity(path_len);
@@ -229,6 +251,7 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                         left: Vector3::default(),
                         right: Vector3::default(),
                         normal: Vector3::new(0.0,0.0,1.0),
+                        direction: Vector3::new(1.0,0.0,0.0)
                     });
                 }
 
@@ -314,6 +337,7 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
 
                     let dir_up = dir_fwd.cross(&dir_side);
                     base_path[i].normal = dir_up;
+                    base_path[i].direction = dir_fwd;
                 }
 
                 for node in base_path {
@@ -326,6 +350,9 @@ fn read_osm(path: &Path, region: &Region) -> Buffer {
                     buffer.write_float(node.normal.x);
                     buffer.write_float(node.normal.y);
                     buffer.write_float(node.normal.z);
+                    buffer.write_float(node.direction.x);
+                    buffer.write_float(node.direction.y);
+                    buffer.write_float(node.direction.z);
                 }
             }
         }
@@ -340,6 +367,16 @@ struct Buffer {
 }
 
 impl Buffer {
+    pub fn save(&self, region: &str, filename: &str) {
+        let out_path = format!("output/{}/{}.bin.gz",region,filename);
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&self.bytes).unwrap();
+        let data = encoder.finish().unwrap();
+
+        std::fs::write(Path::new(&out_path), data).unwrap();
+    }
+
     pub fn write_byte(&mut self, x: u8) {
         self.bytes.push(x);
     }

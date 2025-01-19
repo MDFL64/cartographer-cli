@@ -23,6 +23,18 @@ pub struct Tile {
     pub height: u32
 }
 
+impl Tile {
+    pub fn get(&self, x: usize, y: usize) -> f32 {
+        self.data[y * self.width as usize + x]
+    }
+}
+
+pub struct TileNeighbors {
+    pub next_x: Option<Arc<Tile>>,
+    pub next_y: Option<Arc<Tile>>,
+    pub corner: Option<Arc<Tile>>
+}
+
 pub struct Bounds {
     pub south: f64,
     pub north: f64,
@@ -77,7 +89,13 @@ impl Region {
         let thread_count = available_parallelism().unwrap().get();
 
         let queue = self.tiles.iter().enumerate().map(|(index,tile)| {
-            (index,tile.clone())
+            let neighbors = TileNeighbors{
+                next_x: if tile.width == 512 { Some(self.tiles[index + 1].clone()) } else { None },
+                next_y: if tile.height == 512 { Some(self.tiles[index + 20].clone()) } else { None },
+                corner: if tile.width == 512 && tile.height == 512 { Some(self.tiles[index + 21].clone()) } else { None },
+            };
+
+            (index,tile.clone(),neighbors)
         }).collect::<VecDeque<_>>();
 
         let queue = Arc::new(Mutex::new(queue));
@@ -93,13 +111,12 @@ impl Region {
                         let mut queue = queue.lock().unwrap();
                         queue.pop_front()
                     };
-                    let Some((index,tile)) = item else {
+                    let Some((index,tile, neighbors)) = item else {
                         break;
                     };
-                    let buffer = build_terrain_mesh(&tile.data);
-                    if let Some(buffer) = buffer {
-                        std::fs::write(format!("output/{}/tile{}",name,index), buffer.bytes).unwrap();
-                    }
+                    let buffer = build_terrain_mesh(&tile.data, tile.width as usize, tile.height as usize, neighbors);
+                    //std::fs::write(format!("output/{}/tile{}",name,index), buffer.bytes).unwrap();
+                    buffer.save(&name, &format!("tile{}",index));
                     println!("> elevation mesh {}",index);
                 }
             });
@@ -118,8 +135,7 @@ impl Region {
         }
 
         let buffer = read_osm(Path::new(&path), self);
-        let out_path = format!("output/{}/map",self.name);
-        std::fs::write(Path::new(&out_path), buffer.bytes).unwrap();
+        buffer.save(&self.name, "map");
         println!("> map done");
     }
 

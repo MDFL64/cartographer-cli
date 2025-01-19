@@ -2,25 +2,25 @@ use std::collections::HashMap;
 
 use baby_shark::{decimation::{edge_decimation::ConstantErrorDecimationCriteria, prelude::EdgeDecimator}, exports::nalgebra::Vector3, mesh::{corner_table::table::CornerTable, traits::Mesh}};
 
-use crate::Buffer;
+use crate::{region::TileNeighbors, Buffer};
 
-fn make_grid(size: usize, scale: f64, mut f: impl FnMut(usize,usize)->f64) -> CornerTable<f64> {
+fn make_grid(width: usize, height: usize, scale: f64, mut f: impl FnMut(usize,usize)->f64) -> CornerTable<f64> {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
-    for y in 0..size {
-        for x in 0..size {
+    for y in 0..height {
+        for x in 0..width {
             let z = f(x,y);
             vertices.push(Vector3::new(x as f64, y as f64, z) * scale);
-            if x < size - 1 && y < size - 1 {
-                let index = y*size + x;
+            if x < width - 1 && y < height - 1 {
+                let index = y*width + x;
                 indices.push(index+0);
                 indices.push(index+1);
-                indices.push(index+size);
+                indices.push(index+width);
 
                 indices.push(index+1);
-                indices.push(index+size+1);
-                indices.push(index+size);
+                indices.push(index+width+1);
+                indices.push(index+width);
             }
         }
     }
@@ -28,10 +28,9 @@ fn make_grid(size: usize, scale: f64, mut f: impl FnMut(usize,usize)->f64) -> Co
     CornerTable::from_vertices_and_indices(&vertices, &indices)
 }
 
-pub fn build_terrain_mesh(tile: &[f32]) -> Option<Buffer> {
-    let size = 512;
-    if tile.len() != size*size {
-        return None;
+pub fn build_terrain_mesh(tile: &[f32], width: usize, height: usize, neighbors: TileNeighbors) -> Buffer {
+    if tile.len() != width*height {
+        panic!("tile sized wrongly")
     }
 
     let scale = 1.0;
@@ -43,9 +42,23 @@ pub fn build_terrain_mesh(tile: &[f32]) -> Option<Buffer> {
         .min_faces_count(Some(10_000))
         .keep_boundary(true);
 
-    let mut mesh = make_grid(512, scale, |x,y| {
-        let e = tile[y * 512 + x];
-        e as f64
+    let fixed_width = if width == 512 { width + 1 } else { width };
+    let fixed_height = if height == 512 { height + 1 } else { height };
+
+    let mut mesh = make_grid(fixed_width, fixed_height, scale, |x,y| {
+        if x >= width && y >= width {
+            let neighbor = neighbors.corner.as_ref().unwrap();
+            neighbor.get(0,0) as f64
+        } else if x >= width {
+            let neighbor = neighbors.next_x.as_ref().unwrap();
+            neighbor.get(0,y) as f64
+        } else if y >= height {
+            let neighbor = neighbors.next_y.as_ref().unwrap();
+            neighbor.get(x,0) as f64
+        } else {
+            let e = tile[y * width + x];
+            e as f64
+        }
     });
 
     println!("initial: {} / {}",mesh.vertices().count(),mesh.faces().count());
@@ -109,5 +122,5 @@ pub fn build_terrain_mesh(tile: &[f32]) -> Option<Buffer> {
         buffer.write_short(a);
         buffer.write_short(c);
     }
-    Some(buffer)
+    buffer
 }
