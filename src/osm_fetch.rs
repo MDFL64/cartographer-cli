@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use crate::region::Bounds;
 
@@ -33,6 +33,7 @@ pub fn fetch(bounds: Bounds, path: &Path) {
     println!("> fetching osm...");
     let res = client.post("https://overpass-api.de/api/interpreter")
         .body(encoded)
+        .timeout(Duration::from_secs(600))
         .send().unwrap();
     std::fs::write(path, res.text().unwrap()).unwrap();
 }
